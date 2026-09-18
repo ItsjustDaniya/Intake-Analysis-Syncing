@@ -1,0 +1,39 @@
+name: Sync Metabase attendance & assignments to Google Sheet
+
+on:
+  schedule:
+    # Runs at 03:00 UTC = 08:30 IST every day. Adjust to taste —
+    # https://crontab.guru is handy for editing this.
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sync
+        env:
+          METABASE_URL: ${{ secrets.METABASE_URL }}
+          METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          # Optional overrides — uncomment and set as secrets/vars if you ever
+          # need to point at different question IDs or tab names:
+          # ATTENDANCE_QUESTION_ID: ${{ secrets.ATTENDANCE_QUESTION_ID }}
+          # ASSIGNMENTS_QUESTION_ID: ${{ secrets.ASSIGNMENTS_QUESTION_ID }}
+          # ATTENDANCE_SHEET_NAME: ${{ secrets.ATTENDANCE_SHEET_NAME }}
+          # ASSIGNMENTS_SHEET_NAME: ${{ secrets.ASSIGNMENTS_SHEET_NAME }}
+        run: python metabase_to_sheets.py
