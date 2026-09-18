@@ -75,9 +75,22 @@ def fetch_metabase_question(question_id: int) -> tuple[list[str], list[list[Any]
     """Run a saved Metabase question via the REST API and return
     (column_names, rows). No parameters are sent, so every Field Filter
     in the question (Batch, Date, UserID, ...) is left unset and
-    Metabase returns the full, unfiltered result set."""
+    Metabase returns the full, unfiltered result set.
 
-    url = f"{METABASE_URL}/api/card/{question_id}/query"
+    IMPORTANT: this deliberately calls the `/query/json` *export*
+    endpoint, not the plain `/query` endpoint. The plain endpoint is
+    Metabase's interactive query path (the one the "run this question"
+    button in the UI hits) and it silently truncates results to a low
+    default row cap (commonly ~2000 rows) with no error — rows past
+    that cap (e.g. alphabetically later students, once a question has
+    thousands of rows) just never come back. The `/query/json` export
+    endpoint is meant for full downloads and is not subject to that
+    interactive cap (Metabase's export row limit is far higher, ~1M+),
+    so it's the one to use for anything that needs the complete result
+    set, like this sync.
+    """
+
+    url = f"{METABASE_URL}/api/card/{question_id}/query/json"
     headers = {
         "x-api-key": METABASE_API_KEY,
         "Content-Type": "application/json",
@@ -89,7 +102,7 @@ def fetch_metabase_question(question_id: int) -> tuple[list[str], list[list[Any]
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
-            body = resp.json()
+            records = resp.json()
             break
         except Exception as exc:  # noqa: BLE001 - we want to retry on anything and re-raise at the end
             last_error = exc
@@ -99,12 +112,18 @@ def fetch_metabase_question(question_id: int) -> tuple[list[str], list[list[Any]
     else:
         raise RuntimeError(f"Metabase query for question {question_id} failed after {MAX_RETRIES} attempts") from last_error
 
-    if body.get("status") == "failed":
-        raise RuntimeError(f"Metabase question {question_id} returned an error: {body.get('error')}")
+    if isinstance(records, dict) and records.get("status") == "failed":
+        raise RuntimeError(f"Metabase question {question_id} returned an error: {records.get('error')}")
 
-    data = body["data"]
-    columns = [col.get("display_name") or col.get("name") for col in data["cols"]]
-    rows = data["rows"]
+    if not records:
+        return [], []
+
+    # The JSON export returns a flat list of row objects, e.g.
+    # [{"course_id": 123, "user_id": 197114, ...}, ...] with every
+    # column present (as null where empty) on every row, in column
+    # order — so the first row's keys give us the column order.
+    columns = list(records[0].keys())
+    rows = [[record.get(col) for col in columns] for record in records]
     return columns, rows
 
 
