@@ -83,9 +83,12 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
-REQUEST_TIMEOUT = 120  # seconds — these queries scan a lot of rows
+REQUEST_TIMEOUT = 600  # seconds — the export endpoint has to fully materialize
+                       # 20,000+ rows across several joins/CTEs with no early
+                       # cutoff, so give it real headroom rather than timing
+                       # out and retrying into a query that was about to finish.
 MAX_RETRIES = 3
-RETRY_BACKOFF_SECONDS = 10
+RETRY_BACKOFF_SECONDS = 30
 
 
 # ---------------------------------------------------------------------------
@@ -109,19 +112,27 @@ def fetch_metabase_question(question_id: int) -> tuple[list[str], list[list[Any]
     interactive cap (Metabase's export row limit is far higher, ~1M+),
     so it's the one to use for anything that needs the complete result
     set, like this sync.
+
+    ALSO IMPORTANT: unlike the plain `/query` endpoint (which takes a
+    normal `application/json` body), Metabase's `/query/:export-format`
+    endpoints (json/csv/xlsx) expect `parameters` as a FORM field, not
+    a JSON body — this is the same way the "Download results" button
+    in the Metabase UI submits it. Sending `Content-Type:
+    application/json` here gets rejected with a flat 400 Bad Request
+    for every card, no matter which one, so this sends `data=` (form-
+    encoded) instead of `json=`.
     """
 
     url = f"{METABASE_URL}/api/card/{question_id}/query/json"
     headers = {
         "x-api-key": METABASE_API_KEY,
-        "Content-Type": "application/json",
     }
-    payload = {"parameters": []}
+    form_data = {"parameters": json.dumps([])}
 
     last_error: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+            resp = requests.post(url, headers=headers, data=form_data, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
             records = resp.json()
             break
@@ -180,13 +191,58 @@ def get_or_create_worksheet(spreadsheet: gspread.Spreadsheet, title: str) -> gsp
         return spreadsheet.add_worksheet(title=title, rows=100, cols=26)
 
 
-def overwrite_worksheet(worksheet: gspread.Worksheet, values: list[list[Any]]) -> None:
+def pad_rows(values: list[list[Any]]) -> list[list[Any]]:
+    """Pad every row out to the width of the widest row.
+
+    gspread's get_all_values() (used for the sheet-to-sheet sync) trims
+    each row to *its own* last non-empty cell rather than padding every
+    row to the sheet's full width. If the header row happens to have
+    fewer non-empty cells than the data rows below it (e.g. a formula
+    column with no literal header text, or a header row that was simply
+    typed short), the header row array ends up shorter than the data
+    rows — and when written back, those trailing columns get no header
+    at all even though the data sitting under them is real. Padding
+    every row to a common width before writing fixes that, and is a
+    harmless no-op for data that was already rectangular (like the
+    Metabase rows, which are already uniform-width)."""
+    if not values:
+        return values
+    width = max(len(row) for row in values)
+    return [list(row) + [""] * (width - len(row)) for row in values]
+
+
+def overwrite_worksheet(
+    worksheet: gspread.Worksheet, values: list[list[Any]], value_input_option: str = "RAW"
+) -> None:
     """Clear the tab and write `values` (header row included) back to
     it in as few API calls as gspread's batching allows, then freeze
-    the header row."""
+    the header row.
+
+    value_input_option matters here: "RAW" stores exactly what it's
+    given, with no reinterpretation. That's correct (and safest) for
+    the Metabase syncs, since fetch_metabase_question() already hands
+    this proper Python ints/floats/bools, not strings.
+
+    It is WRONG for the sheet-to-sheet (Contest) sync: that source data
+    comes from gspread's get_all_values(), which always returns every
+    cell as a display STRING, even genuinely numeric ones. Writing
+    those strings back with RAW stores them as literal text — so a
+    user_id that was a number in the source sheet becomes the text
+    "197114" in the destination. Downstream SUMIFS/VLOOKUP-style
+    formulas keyed on that column (e.g. Intake Metrics Core's
+    "Contest- Excel" / "Contest - SQL" columns) then silently match
+    nothing, because Sheets does not match a text criterion range
+    against a numeric lookup value — SUMIFS just returns 0 for every
+    row instead of erroring, which is exactly what "all zeros" looks
+    like. sync_sheet_to_sheet() below passes "USER_ENTERED" for this
+    call, which makes Sheets parse each string the same way it would
+    parse something you typed into a cell — turning "197114" back into
+    the number 197114 (and re-parsing dates, etc.) so downstream
+    formulas match again, the same as IMPORTRANGE did before."""
     worksheet.clear()
+    values = pad_rows(values)
     if values:
-        worksheet.update(values, value_input_option="RAW")
+        worksheet.update(values, value_input_option=value_input_option)
     worksheet.freeze(rows=1)
 
 
@@ -226,15 +282,27 @@ def sync_sheet_to_sheet(
 
     print(f"[{label}] reading '{source_sheet_name}' ...")
     # get_all_values() returns only the used range (no trailing empty
-    # columns/rows padded out to the sheet's full grid size), which
-    # keeps this well clear of any size limits.
+    # columns/rows padded out to the sheet's full grid size), but each
+    # row is trimmed to ITS OWN last non-empty cell rather than to a
+    # common width — pad_rows() (inside overwrite_worksheet) squares
+    # that up before writing, which is what fixes the "headers missing
+    # from column F onward" symptom.
     values = source_worksheet.get_all_values()
     row_count = max(len(values) - 1, 0)  # minus header
-    col_count = len(values[0]) if values else 0
+    col_count = max((len(row) for row in values), default=0)
     print(f"[{label}] got {row_count} data rows, {col_count} columns")
 
     destination_worksheet = get_or_create_worksheet(destination_spreadsheet, destination_sheet_name)
-    overwrite_worksheet(destination_worksheet, values)
+    # USER_ENTERED (not the default RAW): get_all_values() handed us every
+    # cell as a display string, even numeric ones — USER_ENTERED tells
+    # Sheets to re-parse each value the way it would parse something typed
+    # into a cell, so numeric ids/dates come back as real numbers/dates
+    # instead of literal text. See the long comment on overwrite_worksheet()
+    # for why this matters (SUMIFS/VLOOKUP formulas downstream, e.g.
+    # Intake Metrics Core's "Contest- Excel" / "Contest - SQL" columns,
+    # silently match nothing — and read as 0, not an error — when the key
+    # column they're joining on is text instead of numbers).
+    overwrite_worksheet(destination_worksheet, values, value_input_option="USER_ENTERED")
     print(f"[{label}] wrote {row_count} rows to tab '{destination_sheet_name}'")
     return row_count
 
