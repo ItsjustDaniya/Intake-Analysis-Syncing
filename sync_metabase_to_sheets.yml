@@ -4,7 +4,13 @@ on:
   schedule:
     # Runs at 03:00 UTC = 08:30 IST every day. Adjust to taste —
     # https://crontab.guru is handy for editing this.
-    - cron: "0 3 * * *"
+    
+    
+  - cron: "30 3 * * *"   # 9:00 AM IST
+  - cron: "30 6 * * *"   # 12:00 PM IST
+  - cron: "30 9 * * *"   # 3:00 PM IST
+  - cron: "30 12 * * *"  # 6:00 PM IST
+  - cron: "30 15 * * *"  # 9:00 PM IST
   workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
 
 jobs:
