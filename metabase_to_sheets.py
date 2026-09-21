@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Sync data into a Google Sheet, on a schedule (run from GitHub Actions
-cron or any other scheduler). Two independent sync jobs run each time:
+cron or any other scheduler). Three independent sync jobs run each time:
 
-1. METABASE -> SHEET (Attendance + Assignments)
-   Pulls two Metabase saved questions and full-overwrites their tabs.
+1. METABASE -> SHEET (Attendance + Assignments + Ai-Mock Attempts)
+   Pulls three Metabase saved questions and full-overwrites their tabs.
 
 2. SHEET -> SHEET (Student-level-MC -> Contest)
    Copies the "Student-level-MC" tab from a source spreadsheet into a
@@ -31,8 +31,10 @@ Required environment variables (set these as GitHub Actions secrets):
 Optional:
     ATTENDANCE_QUESTION_ID     defaults to 3608
     ASSIGNMENTS_QUESTION_ID    defaults to 7939
+    DSC_QUESTION_ID            defaults to 10254
     ATTENDANCE_SHEET_NAME      defaults to "Attendance"
     ASSIGNMENTS_SHEET_NAME     defaults to "Assignment"
+    DSC_SHEET_NAME             defaults to "Ai-Mock Attempts"
 
     SOURCE_SPREADSHEET_ID      defaults to 1I4HAAkbZl2Zr6IblLRh1AasfBj1LbZCj0bQ-X1wLGFM
     SOURCE_SHEET_NAME          defaults to "Student-level-MC"
@@ -68,7 +70,7 @@ GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 
 ATTENDANCE_QUESTION_ID = int(os.environ.get("ATTENDANCE_QUESTION_ID", "3608"))
 ASSIGNMENTS_QUESTION_ID = int(os.environ.get("ASSIGNMENTS_QUESTION_ID", "7939"))
-DSC_QUESTION_ID=int(os.environ.get("DSC_QUESTION_ID", "10254"))
+DSC_QUESTION_ID = int(os.environ.get("DSC_QUESTION_ID", "10254"))
 
 ATTENDANCE_SHEET_NAME = os.environ.get("ATTENDANCE_SHEET_NAME", "Attendance")
 ASSIGNMENTS_SHEET_NAME = os.environ.get("ASSIGNMENTS_SHEET_NAME", "Assignment")
@@ -326,13 +328,22 @@ def main() -> None:
     assignment_rows = sync_question_to_sheet(
         spreadsheet, ASSIGNMENTS_QUESTION_ID, ASSIGNMENTS_SHEET_NAME, "assignments"
     )
+    # FIX: this third sync (Ai-Mock Attempts, card DSC_QUESTION_ID) had all
+    # its config wired up above — env var, default id, default sheet name —
+    # but was never actually called here, so the tab it targets never got
+    # touched by any run. attendance/assignments worked because they were
+    # explicitly called; this one just needed the same call added.
+    dsc_rows = sync_question_to_sheet(
+        spreadsheet, DSC_QUESTION_ID, DSC_SHEET_NAME, "ai-mock"
+    )
     contest_rows = sync_sheet_to_sheet(
         client, SOURCE_SPREADSHEET_ID, SOURCE_SHEET_NAME, spreadsheet, CONTEST_SHEET_NAME
     )
 
     print(
         f"[sync] done. attendance_rows={attendance_rows} assignment_rows={assignment_rows} "
-        f"contest_rows={contest_rows} finished_at={datetime.now(timezone.utc).isoformat()}"
+        f"dsc_rows={dsc_rows} contest_rows={contest_rows} "
+        f"finished_at={datetime.now(timezone.utc).isoformat()}"
     )
 
 
