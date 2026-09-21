@@ -68,9 +68,11 @@ GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 
 ATTENDANCE_QUESTION_ID = int(os.environ.get("ATTENDANCE_QUESTION_ID", "3608"))
 ASSIGNMENTS_QUESTION_ID = int(os.environ.get("ASSIGNMENTS_QUESTION_ID", "7939"))
+DSC_QUESTION_ID=int(os.environ.get("DSC_QUESTION_ID", "10254"))
 
 ATTENDANCE_SHEET_NAME = os.environ.get("ATTENDANCE_SHEET_NAME", "Attendance")
 ASSIGNMENTS_SHEET_NAME = os.environ.get("ASSIGNMENTS_SHEET_NAME", "Assignment")
+DSC_SHEET_NAME = os.environ.get("DSC_SHEET_NAME", "Ai-Mock Attempts")
 
 # Sheet -> Sheet sync (replaces the IMPORTRANGE formula)
 SOURCE_SPREADSHEET_ID = os.environ.get(
